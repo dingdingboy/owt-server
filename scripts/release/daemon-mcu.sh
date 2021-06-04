@@ -98,7 +98,7 @@ case $startStop in
     case ${command} in
       management-api )
         cd ${OWT_HOME}/management_api
-        nohup nice -n ${OWT_NICENESS} node api.js \
+        nohup nice -n ${OWT_NICENESS} node . \
           > "${stdout}" 2>&1 </dev/null &
         echo $! > ${pid}
         ;;
@@ -164,15 +164,23 @@ case $startStop in
       video-agent )
         cd ${OWT_HOME}/video_agent
         export LD_LIBRARY_PATH=./lib:${LD_LIBRARY_PATH}
-        export PATH=/opt/intel/mediasdk/bin:${PATH}
+        export PATH=./bin:/opt/intel/mediasdk/bin:${PATH}
         nohup nice -n ${OWT_NICENESS} node . -U video\
+          > "${stdout}" 2>&1 </dev/null &
+        echo $! > ${pid}
+        ;;
+      quic-agent )
+        cd ${OWT_HOME}/quic_agent
+        export LD_LIBRARY_PATH=./lib:${LD_LIBRARY_PATH}
+        nohup nice -n ${OWT_NICENESS} node . -U quic\
           > "${stdout}" 2>&1 </dev/null &
         echo $! > ${pid}
         ;;
       analytics-agent )
         cd ${OWT_HOME}/analytics_agent
-        export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:./lib
-        export PATH=${PATH}:/opt/intel/mediasdk/bin
+        export LD_LIBRARY_PATH=./lib:${LD_LIBRARY_PATH}
+        export PATH=./bin:/opt/intel/mediasdk/bin:${PATH}
+        export CONFIGFILE_PATH=./plugin.cfg
         nohup nice -n ${OWT_NICENESS} node . -U analytics\
           > "${stdout}" 2>&1 </dev/null &
         echo $! > ${pid}
@@ -184,8 +192,8 @@ case $startStop in
         echo $! > ${pid}
         ;;
       app )
-        cd ${OWT_HOME}/extras/basic_example/
-        nohup nice -n ${OWT_NICENESS} node samplertcservice.js \
+        cd ${OWT_HOME}/apps/current_app/
+        nohup nice -n ${OWT_NICENESS} node . \
           > "${stdout}" 2>&1 </dev/null &
         echo $! > ${pid}
         ;;

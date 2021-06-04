@@ -19,8 +19,8 @@ optParser.addOption('r', 'repack', 'boolean', 'Whether clean dist before pack (E
 optParser.addOption('e', 'encrypt', 'boolean', 'Whether encrypt during pack (Eg. pack.js -t portal -e)');
 optParser.addOption('d', 'debug', 'boolean', '(Disabled)');
 optParser.addOption('o', 'addon-debug', 'boolean', 'Whether pack debug addon (Eg. pack.js -t webrtc-agent -o)');
-optParser.addOption('f', 'full', 'boolean', 'Whether perform a full pack (--full is the equalivation of pack.js -t all -r -i)');
-optParser.addOption('s', 'sample-path', 'string', 'Specify sample path (Eg. pack.js -t all -s ${samplePath})');
+optParser.addOption('f', 'full', 'boolean', 'Whether perform a full pack (--full is the equalivation of pack.js -t all -r -i). Experimental features are not included, please include them explicitly with -t.');
+optParser.addOption('p', 'app-path', 'string', 'Specify app path (Eg. pack.js -t all --app-path ${appPath})');
 optParser.addOption('a', 'archive', 'string', 'Specify archive name (Eg. pack.js -t all -a ${archiveName})');
 optParser.addOption('n', 'node-module-path', 'string', 'Specify shared-node-module directory');
 optParser.addOption('c', 'copy-module-path', 'string', 'Specify copy node modules directory');
@@ -28,6 +28,7 @@ optParser.addOption('b', 'binary', 'boolean', 'Pack binary');
 optParser.addOption('np', 'no-pseudo', 'boolean', 'Whether use pseudo library');
 optParser.addOption('wf', 'with-ffmpeg', 'boolean', 'Whether pack ffmpeg library');
 optParser.addOption('h', 'help', 'boolean', 'Show help');
+optParser.addOption('li', 'lint', 'boolean', 'Whether lint code with eslint');
 
 const options = optParser.parseArgs(process.argv);
 
@@ -40,10 +41,15 @@ const originCwd = cwd();
 const osScript = path.join(rootDir, 'scripts/detectOS.sh');
 const osType = execSync(`bash ${osScript}`).toString().toLowerCase();
 
+const experimentalTargets = ['quic-agent'];
+
 var allTargets = [];
 
 if (options.full) {
-  options.target = ['all'];
+  if (!options.target) {
+    options.target = [];
+  }
+  options.target.push('all');
   options.repack = true;
   options['install-module'] = true;
 }
@@ -51,6 +57,25 @@ if (options.full) {
 if (options.help || Object.keys(options).length === 0) {
   optParser.printHelp();
   process.exit(0);
+}
+
+if (options.lint) {
+  // Check lint deps
+  const lintDeps = ['eslint'];
+  console.log('Checking lint dependencies...');
+  const npmRoot = execSync(`npm root -g`).toString().trim();
+  const missingLintDeps = lintDeps.filter((dep) => {
+    return !fs.existsSync(path.join(npmRoot, dep));
+  });
+
+  if (missingLintDeps.length === 0) {
+    console.log('Lint dependencies OK.');
+  } else {
+    for (const dep of missingLintDeps) {
+      console.log('Installing eslint');
+      execSync(`npm install eslint --global --save-dev`);
+    }
+  }
 }
 
 var npmInstallOption = '';
@@ -65,22 +90,20 @@ if (options.archive) {
 
 if (options.encrypt) {
   const encryptDeps = [
-    'uglify-js',
-    'babel-cli',
-    'babel-preset-es2015',
-    'babel-preset-stage-0',
+    'uglify-es',
   ];
 
   // Check encrypt deps
   console.log('Checking encrypt dependencies...');
-  try {
-    for (const dep of encryptDeps) {
-      execSync(`npm list -g ${dep}`);
-    }
+  const npmRoot = execSync(`npm root -g`).toString().trim();
+  const missingDeps = encryptDeps.filter((dep) => {
+    return !fs.existsSync(path.join(npmRoot, dep));
+  });
+
+  if (missingDeps.length === 0) {
     console.log('Encrypt dependencies OK.');
-  } catch (e) {
-    console.log('Install node dependencies for Encrypt...');
-    for (const dep of encryptDeps) {
+  } else {
+    for (const dep of missingDeps) {
       execSync(`npm install -g --save-dev ${dep}`, { stdio: 'inherit' });
     }
   }
@@ -119,7 +142,11 @@ function getPackList(targets) {
     console.log('Avalible Targets Are:');
     console.log('---------------------');
     for (const target of targets) {
-      console.log(`\x1b[32m${target.rules.name}\x1b[0m`);
+      let targetTitle = `\x1b[32m${target.rules.name}\x1b[0m`;
+      if (experimentalTargets.includes(target.rules.name)) {
+        targetTitle += ' (experimental feature)'
+      }
+      console.log(targetTitle);
       console.log(' ->', target.path);
     }
     process.exit(0);
@@ -130,7 +157,8 @@ function getPackList(targets) {
   }
 
   var packList = targets.filter((element) => {
-    if (options.target.includes('all')) return true;
+    // Experimental features are not included by default.
+    if (options.target.includes('all') && !experimentalTargets.includes(element.rules.name)) return true;
     return options.target.includes(element.rules.name);
   });
   if (packList.length === 0) {
@@ -232,6 +260,14 @@ function packCommon(target) {
     // Copy common files
     for (const file of common.files) {
       const filePath = path.join(packSrc, file);
+      const extname = path.extname(filePath);
+      if (options.lint && extname === '.js') {
+        try {
+          execSync(`eslint -c ${rootDir}/source/.eslintrc.json ${filePath}`);
+        } catch(error) {
+          console.error(error.stdout.toString());
+        }
+      }
       execSync(`cp -a ${filePath} ${packDist}`);
     }
   }
@@ -329,21 +365,27 @@ function packAddon(target) {
         let dummyOpenh264 = path.join(rootDir, 'third_party/openh264/pseudo-openh264.so');
         execSync(`cp -av ${dummyOpenh264} ${libOpenh264}`);
       }
-      if (target.rules.name.indexOf('video') === 0) {
-        let vasrc = path.join(depsDir, 'bin/vainfo');
-        let vadist = path.join(packDist, 'bin');
-        if (fs.existsSync(vasrc)) {
-          if (!fs.existsSync(vadist)) {
-            execSync(`mkdir -p ${vadist}`);
-          }
-          execSync(`cp -av ${vasrc} ${vadist}`);
-        }
-      }
-      if (options['archive'] && !options['no-pseudo']) {
-        let libSvtHevcEnc = path.join(libDist, 'libSvtHevcEnc.so.1');
+
+      let libSvtHevcEnc = path.join(libDist, 'libSvtHevcEnc.so.1');
+      if (options['archive'] && fs.existsSync(libSvtHevcEnc) && !options['no-pseudo']) {
         let dummySvtHevcEnc = path.join(rootDir, 'third_party/SVT-HEVC/pseudo-svtHevcEnc.so');
         execSync(`cp -av ${dummySvtHevcEnc} ${libSvtHevcEnc}`);
       }
+
+      if (target.rules.name.indexOf('video') === 0
+        || target.rules.name.indexOf('analytics') === 0) {
+        if (fs.existsSync('/opt/intel/mediasdk')) {
+          let dst_bin = path.join(packDist, 'bin');
+          let dst_lib = path.join(packDist, 'lib');
+          if (!fs.existsSync(dst_bin)) {
+            execSync(`mkdir -p ${dst_bin}`);
+          }
+
+          execSync(`find /opt/intel/mediasdk -type f -name metrics_monitor  | xargs -I '{}' cp -av '{}' ${dst_bin}`);
+          execSync(`find /opt/intel/mediasdk -type f -name libcttmetrics.so | xargs -I '{}' cp -av '{}' ${dst_lib}`);
+        }
+      }
+
       console.log(target.rules.name, '- Pack addon finished.');
     });
 }
@@ -386,6 +428,17 @@ function getAddonLibs(addonPath) {
                   return line;
                 }).catch((e) => line);
             }
+          })
+          .catch((e) => {
+            // give more detail when ldd returns somelib.so => not found
+            if (!line.startsWith('/')) {
+              return exec(`ldd ${addonPath} | grep '=>' | grep -v '=> /'`).then(stdout => {
+                e.message = `library dependency not found for\n  ${addonPath}:\n${stdout}` +
+                  'Something failed to build. Try nvm use v8.15.0 and rerun build.js.';
+                throw e;
+              });
+            }
+            throw e;
           });
         checks.push(checkPros[line]);
       }
@@ -401,6 +454,9 @@ function isLibAllowed(libSrc) {
     return false;
 
   const whiteList = [
+    'rtcadapter',
+    'libssl.so.1.1',
+    'libcrypto.so.1.1',
     'libnice',
     'libSvtHevcEnc',
     'libusrsctp',
@@ -412,6 +468,9 @@ function isLibAllowed(libSrc) {
   if (!options['archive'] || options['with-ffmpeg']) {
     whiteList.push('libav');
     whiteList.push('libsw');
+    if (osType.includes('centos') || (osType.includes('ubuntu') && osType.includes('20.04'))) {
+      whiteList.push('libboost');
+    }
   }
 
   const libName = path.basename(libSrc);
@@ -504,13 +563,7 @@ function encrypt(target) {
       return Promise.resolve();
     }
     var jsJobs = stdout.trim().split('\n').map((line) => {
-      return exec(`babel --presets es2015,stage-0 ${line} -o "${line}.es5"`, { env })
-        .then(() => {
-          return exec(`uglifyjs ${line}.es5 -o ${line} -c -m`, { env });
-        })
-        .then(() => {
-          return exec(`rm "${line}.es5"`);
-        });
+      return exec(`uglifyjs ${line} -o ${line} -c -m`, { env });
     });
     return Promise.all(jsJobs);
   })
@@ -577,6 +630,9 @@ function packScripts() {
   }
   scriptItems.push('app');
   scriptItems.forEach((m) => {
+    if (!options.target.includes(m) && experimentalTargets.includes(m)) {
+      return;
+    }
     startCommands += '${bin}/daemon.sh start ' + m + ' $1\n';
     stopCommands += '${bin}/daemon.sh stop ' + m + '\n';
   });
@@ -589,24 +645,37 @@ function packScripts() {
   execSync(`chmod +x ${binDir}/\*.sh`);
 }
 
-function packSamples() {
-  if (!options['sample-path']) return;
+function packApps() {
+  if (!options['app-path']) return;
   chdir(originCwd);
-  var samplePath = options['sample-path'];
-  if (!fs.existsSync(samplePath)) {
-    console.log(`\x1b[31mError: ${samplePath} does not exist\x1b[0m`);
+  var appPath = options['app-path'];
+  if (!fs.existsSync(appPath)) {
+    console.log(`\x1b[31mError: ${appPath} does not exist\x1b[0m`);
     return;
   }
-  execSync(`rm -rf ${distDir}/extras`);
-  execSync(`mkdir -p ${distDir}/extras`);
-  execSync(`cp -a ${samplePath} ${distDir}/extras/basic_example`);
+  execSync(`rm -rf ${distDir}/apps`);
+  execSync(`mkdir -p ${distDir}/apps`);
+  console.log('\x1b[32mApps folder created in :', distDir, '\x1b[0m');
+  execSync(`cp -a ${appPath} ${distDir}/apps/current_app`);
 
-  const certScript = `${distDir}/extras/basic_example/initcert.js`;
+  // Look in the app's package.json to see what file to use for main.js
+  var jsonTXT = execSync(`cat ${distDir}/apps/current_app/package.json`);
+  var appJSON = JSON.parse(jsonTXT)["main"];
+
+  if (!appJSON === undefined) {
+    console.log("\x1b[31mError: No main js file for the app\x1b[0m");
+    return;
+  } else {
+    // Make a soft link to the main JS file node.js should call
+    if (appJSON !== 'main.js')
+      execSync(`ln -srf ${distDir}/apps/current_app/${appJSON} ${distDir}/apps/current_app/main.js`);
+  }
+  const certScript = `${distDir}/apps/current_app/initcert.js`;
   if (fs.existsSync(certScript))
     execSync(`chmod +x ${certScript}`);
 
   if (options['install-module']) {
-    chdir(`${distDir}/extras/basic_example`);
+    chdir(`${distDir}/apps/current_app`);
     execSync('npm install' + npmInstallOption);
   }
 }
@@ -628,7 +697,7 @@ getTargets()
   .then(cleanIfRepack)
   .then(processTargets)
   .then(packScripts)
-  .then(packSamples)
+  .then(packApps)
   .then(archive)
   .then(() => {
     console.log('\x1b[32mWork finished in directory:', distDir, '\x1b[0m');

@@ -8,6 +8,7 @@
 #include <rtputils.h>
 #include <sstream>
 #include <sys/time.h>
+#include <memory>
 
 #include "MediaUtilities.h"
 
@@ -49,7 +50,9 @@ static int filterNALs(uint8_t *data, int size, const std::vector<int> &remove_ty
         nalu_type = buffer_start[nalu_start_offset] & 0x1F;
         if ((remove_types.size() > 0 && find(remove_types.begin(), remove_types.end(), nalu_type) != remove_types.end())
                 || (pass_types.size() > 0 && find(pass_types.begin(), pass_types.end(), nalu_type) == pass_types.end())) {
-            memmove(buffer_start, buffer_start + nalu_start_offset + nalu_found_length, buffer_length - nalu_start_offset - nalu_found_length);
+            std::unique_ptr<uint8_t> buffer_delegate(buffer_start);
+            memmove(buffer_delegate.get(), buffer_delegate.get() + nalu_start_offset + nalu_found_length, buffer_length - nalu_start_offset - nalu_found_length);
+            buffer_delegate.release();
             buffer_length -= nalu_start_offset + nalu_found_length;
 
             remove_nals_size += nalu_start_offset + nalu_found_length;
@@ -66,9 +69,10 @@ FramePacket::FramePacket (AVPacket *packet)
     : m_packet(NULL)
 {
     m_packet = (AVPacket *)malloc(sizeof(AVPacket));
-
-    av_init_packet(m_packet);
-    av_packet_ref(m_packet, packet);
+    if (m_packet) {
+      av_init_packet(m_packet);
+      av_packet_ref(m_packet, packet);
+    }
 }
 
 FramePacket::~FramePacket()
@@ -425,7 +429,7 @@ LiveStreamIn::LiveStreamIn(const Options& options, EventRegistry* handle)
     , m_timstampOffset(0)
     , m_lastTimstamp(0)
     , m_enableVideoExtradata(false)
-    , m_sps_pps_buffer(NULL)
+    , m_sps_pps_buffer()
     , m_sps_pps_buffer_length(0)
 {
     ELOG_INFO_T("url: %s, audio: %s, video: %s, transport: %s, bufferSize: %d"
@@ -502,8 +506,7 @@ LiveStreamIn::~LiveStreamIn()
 
     m_enableVideoExtradata = false;
     if (m_sps_pps_buffer) {
-        free(m_sps_pps_buffer);
-        m_sps_pps_buffer = NULL;
+        m_sps_pps_buffer.reset();
         m_sps_pps_buffer_length = 0;
     }
 
@@ -782,8 +785,7 @@ bool LiveStreamIn::reconnect()
 
     m_enableVideoExtradata = false;
     if (m_sps_pps_buffer) {
-        free(m_sps_pps_buffer);
-        m_sps_pps_buffer = NULL;
+        m_sps_pps_buffer.reset();
         m_sps_pps_buffer_length = 0;
     }
 
@@ -1076,13 +1078,16 @@ bool LiveStreamIn::parse_avcC(AVPacket *pkt) {
         int nals_size = 0;
 
         if (m_sps_pps_buffer) {
-            free(m_sps_pps_buffer);
-            m_sps_pps_buffer = NULL;
+            m_sps_pps_buffer.reset();
             m_sps_pps_buffer_length = 0;
         }
 
         int nals_buf_length = 128;
         uint8_t *nals_buf = (uint8_t *)malloc(nals_buf_length);
+        if (nals_buf == nullptr) {
+            ELOG_ERROR_T("OOM! Allocate size %d", nals_buf_length);
+            return false;
+        }
 
         int i, cnt, nalsize;
         const uint8_t *p = data;
@@ -1114,6 +1119,10 @@ bool LiveStreamIn::parse_avcC(AVPacket *pkt) {
 
                 nals_buf_length += nalsize + 4;
                 nals_buf = (uint8_t *)realloc(nals_buf, nals_buf_length);
+                if (nals_buf == nullptr) {
+                    ELOG_ERROR_T("OOM! Allocate size %d", nals_buf_length);
+                    return false;
+                }
             }
 
             nals_buf[nals_size] = 0;
@@ -1145,6 +1154,10 @@ bool LiveStreamIn::parse_avcC(AVPacket *pkt) {
 
                 nals_buf_length += nalsize + 4;
                 nals_buf = (uint8_t *)realloc(nals_buf, nals_buf_length);
+                if (nals_buf == nullptr) {
+                    ELOG_ERROR_T("OOM! Allocate size %d", nals_buf_length);
+                    return false;
+                }
             }
 
             nals_buf[nals_size] = 0;
@@ -1161,8 +1174,8 @@ bool LiveStreamIn::parse_avcC(AVPacket *pkt) {
             ELOG_DEBUG_T("New video extradata");
 
             m_sps_pps_buffer_length = nals_size;
-            m_sps_pps_buffer = (uint8_t *)malloc(m_sps_pps_buffer_length);
-            memcpy(m_sps_pps_buffer, nals_buf , m_sps_pps_buffer_length);
+            m_sps_pps_buffer.reset(new uint8_t[m_sps_pps_buffer_length]);
+            memcpy(m_sps_pps_buffer.get(), nals_buf , m_sps_pps_buffer_length);
         }
 
         free(nals_buf);
@@ -1193,7 +1206,7 @@ bool LiveStreamIn::filterPS(AVStream *st, AVPacket *pkt) {
 
             av_grow_packet(pkt, m_sps_pps_buffer_length);
             memmove(pkt->data + m_sps_pps_buffer_length, pkt->data, pkt->size - m_sps_pps_buffer_length);
-            memcpy(pkt->data, m_sps_pps_buffer, m_sps_pps_buffer_length);
+            memcpy(pkt->data, m_sps_pps_buffer.get(), m_sps_pps_buffer_length);
         }
     }
 

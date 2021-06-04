@@ -7,6 +7,11 @@ bin=`dirname "$0"`
 bin=`cd "$bin"; pwd`
 ROOT=`cd "${bin}/.."; pwd`
 
+SUDO=""
+if [[ $EUID -ne 0 ]]; then
+   SUDO="sudo -E"
+fi
+
 OWT_UPDATE_DONE=false
 HAVE_AUTH_UPDATE=false
 
@@ -17,7 +22,6 @@ usage()
 
 copy_video_libs()
 {
-  cp ${ROOT}/video_agent/lib/* ${ROOT}/analytics_agent/lib/
   cp ${ROOT}/video_agent/lib/* ${ROOT}/audio_agent/lib/
   cp ${ROOT}/video_agent/lib/* ${ROOT}/recording_agent/lib/
   cp ${ROOT}/video_agent/lib/* ${ROOT}/streaming_agent/lib/
@@ -35,6 +39,7 @@ init_software()
     ${ROOT}/webrtc_agent/install_deps.sh
     ${ROOT}/video_agent/install_deps.sh
     ${ROOT}/video_agent/init.sh
+    ${ROOT}/analytics_agent/install_deps.sh
     copy_video_libs
   else
     ${ROOT}/bin/init-mongodb.sh
@@ -65,6 +70,8 @@ init_hardware()
     ${ROOT}/management_api/init.sh
     ${ROOT}/video_agent/init.sh --hardware
   fi
+
+  ${SUDO} sh -c "echo 0 >> /proc/sys/kernel/perf_event_paranoid"
 }
 
 init_auth()

@@ -164,7 +164,15 @@ case $startStop in
       video-agent )
         cd ${OWT_HOME}/video_agent
         export LD_LIBRARY_PATH=./lib:${LD_LIBRARY_PATH}
+        export PATH=./bin:/opt/intel/mediasdk/bin:${PATH}
         nohup nice -n ${OWT_NICENESS} ./OWT-MCU-Agent . -U video\
+          > "${stdout}" 2>&1 </dev/null &
+        echo $! > ${pid}
+        ;;
+      quic-agent )
+        cd ${OWT_HOME}/quic_agent
+        export LD_LIBRARY_PATH=./lib:${LD_LIBRARY_PATH}
+        nohup nice -n ${OWT_NICENESS} ./OWT-MCU-Agent . -U quic\
           > "${stdout}" 2>&1 </dev/null &
         echo $! > ${pid}
         ;;
@@ -175,8 +183,8 @@ case $startStop in
         echo $! > ${pid}
         ;;
       app )
-        cd ${OWT_HOME}/extras/basic_example/
-        nohup nice -n ${OWT_NICENESS} node samplertcservice.js \
+        cd ${OWT_HOME}/apps/current_app/
+        nohup nice -n ${OWT_NICENESS} node . \
           > "${stdout}" 2>&1 </dev/null &
         echo $! > ${pid}
         ;;
@@ -188,6 +196,13 @@ case $startStop in
 
     sleep 1; [[ -f ${stdout} ]] && head "$stdout"
     ;;
+    
+  (restart)
+     echo restarting $command
+
+     ${0} stop $command
+     ${0} start $command
+     ;;    
 
   (stop)
     if [ -f $pid ]; then

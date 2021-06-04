@@ -19,17 +19,17 @@ usage() {
   echo
 }
 
-enable_intel_gpu_top() {
-  echo "Enable Intel GPU Top"
-  # make intel-gpu-tools accessable by non-root users.
-  ${SUDO} chmod a+rw /sys/devices/pci0000:00/0000:00:02.0/resource*
-  # make the above change effect at every system startup.
-  ${SUDO} chmod +x /etc/rc.local /etc/rc.d/rc.local
-  if ${SUDO} grep -RInqs "chmod a+rw /sys/devices/pci0000:00/0000:00:02.0/resource*" /etc/rc.local; then
-    echo "intel-gpu-tools has been authorised to non-root users."
-  else
-    ${SUDO} sh -c "echo \"chmod a+rw /sys/devices/pci0000:00/0000:00:02.0/resource*\" >> /etc/rc.local"
-  fi
+install_boost() {
+  echo -e "\x1b[32mInstalling boost...\x1b[0m"
+  pushd ${this} >/dev/null
+  wget -c http://iweb.dl.sourceforge.net/project/boost/boost/1.65.0/boost_1_65_0.tar.bz2
+  tar xvf boost_1_65_0.tar.bz2
+  pushd boost_1_65_0 >/dev/null
+  ./bootstrap.sh
+  ./b2 --with-thread --with-system
+  cp stage/lib/libboost_*.so* ${this}/lib
+  popd
+  popd
 }
 
 install_deps() {
@@ -51,8 +51,9 @@ install_deps() {
       ${SUDO} rpm -Uvh epel-release-latest-7*.rpm
     fi
     ${SUDO} sed -i 's/https/http/g' /etc/yum.repos.d/epel.repo
-    ${SUDO} yum install boost-system boost-thread log4cxx bzip2 -y
+    ${SUDO} yum install log4cxx bzip2 -y
     ${SUDO} yum install intel-gpu-tools -y
+    install_boost
 
   elif [[ "$OS" =~ .*ubuntu.* ]]
   then
@@ -91,7 +92,7 @@ install_deps
 ${this}/install_ffmpeg.sh
 
 if ${HARDWARE_DEPS} ; then
-  enable_intel_gpu_top
+  :
 else
   # Install if no input for 15s
   read -t 15 -p "Installing OpenH264 Video Codec Library provided by Cisco Systems, Inc? [Yes/no]" yn

@@ -13,7 +13,7 @@
             "../nodeManager.js",
             "../workingNode.js",
             "log4cxx.properties",
-            "../../common/amqp_client.js",
+            "../../common/amqpClient.js",
             "../../common/cipher.js",
             "../../common/clusterWorker.js",
             "../../common/loadCollector.js",
@@ -29,8 +29,9 @@
                 "index.js",
                 "wrtcConnection.js",
                 "connection.js",
-                "sdp.js",
                 "mediaConfig.js",
+                "profileFilter.js",
+                "sdpInfo.js",
                 "../connections.js",
                 "../InternalConnectionFactory.js"
             ],
@@ -43,8 +44,12 @@
         "libdist": "lib",
         "addons": [
             {
-                "folder": "webrtcLib",
-                "name": "webrtc"
+                "folder": "rtcConn",
+                "name": "rtcConn"
+            },
+            {
+                "folder": "rtcFrame",
+                "name": "rtcFrame"
             },
             {
                 "folder": "../addons/internalIO",

@@ -143,17 +143,23 @@ exports.list = function (serviceId, options, callback) {
  * Get Room. Represents a determined room.
  */
 exports.get = function (serviceId, roomId, callback) {
-  Service.findById(serviceId).populate('rooms').lean().exec(function (err, service) {
+  Service.findById(serviceId).lean().exec(function (err, service) {
+    
     if (err) return callback(err, null);
 
-    var i;
+    var i, match = false;
     for (i = 0; i < service.rooms.length; i++) {
-      if (service.rooms[i]._id.toString() === roomId) {
-        callback(null, service.rooms[i]);
-        return;
+      if (service.rooms[i].toString() === roomId) {
+        match = true;
+        break;
       }
     }
-    callback(null, null);
+
+    if (!match) return callback(null, null);
+    
+    Room.findById(roomId).lean().exec(function (err, room) {
+        return callback(err, room);
+    });
   });
 };
 
@@ -161,7 +167,7 @@ exports.get = function (serviceId, roomId, callback) {
  * Delete Room. Removes a determined room from the data base.
  */
 exports.delete = function (serviceId, roomId, callback) {
-  Room.remove({_id: roomId}, function(err0) {
+  Room.deleteOne({_id: roomId}, function(err0) {
     Service.findByIdAndUpdate(serviceId, { '$pull' : { 'rooms' : roomId } },
       function (err1, service) {
         if (err1) console.log('Pull rooms fail:', err1.message);

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -e
 
 pause() {
   read -p "$*"
@@ -136,6 +136,7 @@ install_libnice014(){
     patch -p1 < $PATHNAME/patches/libnice014-removecandidate.patch
     patch -p1 < $PATHNAME/patches/libnice014-keepalive.patch
     patch -p1 < $PATHNAME/patches/libnice014-startcheck.patch
+    patch -p1 < $PATHNAME/patches/libnice014-closelock.patch
     PKG_CONFIG_PATH=$PREFIX_DIR"/lib/pkgconfig":$PREFIX_DIR"/lib64/pkgconfig":$PKG_CONFIG_PATH ./configure --prefix=$PREFIX_DIR && make -s V= && make install
     cd $CURRENT_DIR
   else
@@ -149,15 +150,17 @@ install_openssl(){
   $INCR_INSTALL && [[ ! -z $LIST_LIBS ]] && echo "openssl already installed." && return 0
 
   if [ -d $LIB_DIR ]; then
-    local SSL_VERSION="1.0.2r"
+    local SSL_BASE_VERSION="1.1.1"
+    local SSL_VERSION="1.1.1j"
     cd $LIB_DIR
     rm -f ./build/lib/libssl.*
     rm -f ./build/lib/libcrypto.*
     rm -rf openssl-1*
-    wget -c http://www.openssl.org/source/openssl-${SSL_VERSION}.tar.gz
+
+    wget -c https://www.openssl.org/source/openssl-${SSL_VERSION}.tar.gz
     tar xf openssl-${SSL_VERSION}.tar.gz
     cd openssl-${SSL_VERSION}
-    ./config no-ssl3 --prefix=$PREFIX_DIR -fPIC
+    ./config no-ssl3 --prefix=$PREFIX_DIR -fPIC --libdir=lib
     make depend
     make -s V=0
     make install
@@ -233,6 +236,18 @@ install_libexpat() {
   fi
 }
 
+install_webrtc79(){
+  $INCR_INSTALL &&  [[ -s $ROOT/third_party/webrtc-m79/libwebrtc.a ]] && \
+  echo "libwebrtc already installed." && return 0
+
+  [[ ! -d $ROOT/third_party/webrtc-m79 ]] && \
+    mkdir $ROOT/third_party/webrtc-m79
+
+  pushd ${ROOT}/third_party/webrtc-m79 >/dev/null
+  . $PATHNAME/installWebrtc.sh
+  popd
+}
+
 install_webrtc(){
   $INCR_INSTALL &&  [[ -s $ROOT/third_party/webrtc/libwebrtc.a ]] && \
   echo "libwebrtc already installed." && return 0
@@ -256,6 +271,8 @@ install_webrtc(){
   ./src/tools-woogeen/install.sh
   ./src/tools-woogeen/build.sh
   popd
+
+  install_webrtc79
 }
 
 install_licode(){
@@ -282,12 +299,35 @@ install_licode(){
 }
 
 install_quic(){
+  # QUIC IO
   rm $ROOT/third_party/quic-lib -rf
   mkdir $ROOT/third_party/quic-lib
 
   pushd ${ROOT}/third_party/quic-lib
   wget https://github.com/open-webrtc-toolkit/owt-deps-quic/releases/download/v0.1/dist.tgz
   tar xzf dist.tgz
+  popd
+
+  # QUIC transport
+  local QUIC_SDK_VERSION=`cat ${ROOT}/source/agent/addons/quic/quic_sdk_version`
+  local QUIC_TRANSPORT_PATH=${ROOT}/third_party/quic-transport
+  local QUIC_HEADERS_DIR=${ROOT}/build/libdeps/build/include/owt
+  if [ -d ${QUIC_TRANSPORT_PATH} ]; then
+    rm -r ${QUIC_TRANSPORT_PATH}
+  fi
+  mkdir ${QUIC_TRANSPORT_PATH}
+  pushd ${QUIC_TRANSPORT_PATH}
+  if wget ${QUIC_TRANSPORT_PACKAGE_URL_PREFIX}/linux/${QUIC_SDK_VERSION}.zip; then
+    unzip ${QUIC_SDK_VERSION}.zip
+    rm ${QUIC_SDK_VERSION}.zip
+    cp bin/release/libowt_quic_transport.so ${ROOT}/build/libdeps/build/lib
+    if [ -d ${QUIC_HEADERS_DIR} ]; then
+      rm -r ${QUIC_HEADERS_DIR}
+    fi
+    cp -r include/owt ${QUIC_HEADERS_DIR}
+  else
+    read -p "Failed to download prebuild QUIC SDK. Please download and compile QUIC SDK version ${QUIC_SDK_VERSION} from https://github.com/open-webrtc-toolkit/owt-deps-quic."
+  fi
   popd
 }
 
@@ -310,6 +350,7 @@ install_libsrtp2(){
 
   if [ -d $LIB_DIR ]; then
     cd $LIB_DIR
+    rm -rf libsrtp-2.1.0
     curl -o libsrtp-2.1.0.tar.gz https://codeload.github.com/cisco/libsrtp/tar.gz/v2.1.0
     tar -zxvf libsrtp-2.1.0.tar.gz
     cd libsrtp-2.1.0
@@ -323,7 +364,7 @@ install_libsrtp2(){
 }
 
 install_node() {
-  local NODE_VERSION="v8.15.0"
+  local NODE_VERSION="v10.21.0"
   echo -e "\x1b[32mInstalling nvm...\x1b[0m"
   NVM_DIR="${HOME}/.nvm"
 
@@ -346,7 +387,7 @@ install_node_tools() {
   fi
 
   check_proxy
-  npm install -g --loglevel error node-gyp grunt-cli underscore jsdoc
+  npm install -g --loglevel error node-gyp@6.1.0 grunt-cli underscore jsdoc
   pushd ${ROOT} >/dev/null
   npm install nan@2.11.1
   pushd ${ROOT}/node_modules/nan >/dev/null
@@ -365,7 +406,7 @@ install_libre() {
     rm -rf re
     git clone https://github.com/creytiv/re.git
     pushd re >/dev/null
-    git checkout v0.4.16
+    git checkout v0.5.0
     make SYSROOT_ALT=${PREFIX_DIR} RELEASE=1
     make install SYSROOT_ALT=${PREFIX_DIR} RELEASE=1 PREFIX=${PREFIX_DIR}
     popd >/dev/null
@@ -467,7 +508,7 @@ install_svt_hevc(){
     pushd SVT-HEVC >/dev/null
     git checkout v1.3.0
 
-    mkdir build
+    mkdir -p build
     pushd build >/dev/null
     cmake -DCMAKE_C_FLAGS="-std=gnu99" -DCMAKE_INSTALL_PREFIX=${PREFIX_DIR} ..
     make && make install
@@ -493,5 +534,20 @@ cleanup_common(){
     rm -f gcc*
     rm -f libva-utils*
     cd $CURRENT_DIR
+  fi
+}
+
+install_boost(){
+  if [ -d $LIB_DIR ]; then
+    cd $LIB_DIR
+    wget -c http://iweb.dl.sourceforge.net/project/boost/boost/1.65.0/boost_1_65_0.tar.bz2
+    tar xvf boost_1_65_0.tar.bz2
+    cd boost_1_65_0
+    chmod +x bootstrap.sh
+    ./bootstrap.sh
+    ./b2 && ./b2 install --prefix=$PREFIX_DIR
+  else
+    mkdir -p $LIB_DIR
+    install_boost
   fi
 }

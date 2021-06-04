@@ -8,14 +8,11 @@ var path = require('path');
 var url = require('url');
 var log = require('./logger').logger.getLogger('AccessController');
 
-module.exports.create = function(spec, rpcReq, onSessionEstablished, onSessionAborted, onLocalSessionSignaling) {
+module.exports.create = function(spec, rpcReq, on_session_established, on_session_aborted, on_session_signaling, rtc_controller, quic_controller) {
   var that = {},
     cluster_name = spec.clusterName,
     self_rpc_id = spec.selfRpcId,
-    in_room = spec.inRoom,
-    on_session_established = onSessionEstablished,
-    on_session_aborted = onSessionAborted,
-    on_session_signaling = onLocalSessionSignaling;
+    in_room = spec.inRoom;
 
   /*
    *sessions: {
@@ -57,6 +54,7 @@ module.exports.create = function(spec, rpcReq, onSessionEstablished, onSessionAb
 
   const onReady = (sessionId, status) => {
     var audio = status.audio, video = status.video;
+    var simulcast = status.simulcast;
     var session = sessions[sessionId];
 
     if (session.options.type === 'webrtc') {
@@ -88,6 +86,7 @@ module.exports.create = function(spec, rpcReq, onSessionEstablished, onSessionAb
       media.video && session.options.media.video && session.options.media.video.parameters && session.options.media.video.parameters.resolution && (media.video.resolution = session.options.media.video.parameters.resolution);
       media.video && session.options.media.video && session.options.media.video.parameters && session.options.media.video.parameters.framerate && (media.video.framerate = session.options.media.video.parameters.framerate);
 
+      simulcast && simulcast.video && (media.video.simulcast = true);
       session.options.attributes && (info.attributes = session.options.attributes);
     } else {
       if (session.options.media.audio) {
@@ -120,6 +119,7 @@ module.exports.create = function(spec, rpcReq, onSessionEstablished, onSessionAb
     var session_info = {
       locality: session.locality,
       media: media,
+      data: session.options.data,
       info: info
     };
 
@@ -187,8 +187,14 @@ module.exports.create = function(spec, rpcReq, onSessionEstablished, onSessionAb
     return Promise.all(pl);
   };
 
-  that.initiate = (participantId, sessionId, direction, origin, sessionOptions, formatPreference) => {
+  that.initiate = function(participantId, sessionId, direction, origin, sessionOptions, formatPreference) {
     log.debug('initiate, participantId:', participantId, 'sessionId:', sessionId, 'direction:', direction, 'origin:', origin, 'sessionOptions:', sessionOptions);
+    if (sessionOptions.type === 'webrtc') {
+      return rtc_controller.initiate(participantId, sessionId, direction, origin, sessionOptions, formatPreference);
+    }
+    if (sessionOptions.type === 'quic') {
+      return quic_controller.initiate(participantId, sessionId, direction, origin, sessionOptions, formatPreference);
+    }
     if (sessions[sessionId]) {
       return Promise.reject('Session exists');
     }
@@ -218,7 +224,9 @@ module.exports.create = function(spec, rpcReq, onSessionEstablished, onSessionAb
           controller: self_rpc_id
         };
         sessionOptions.connection && (options.connection = sessionOptions.connection);
+        sessionOptions.transport && (options.transport = sessionOptions.transport);
         sessionOptions.media && (options.media = sessionOptions.media);
+        sessionOptions.data && (options.data = sessionOptions.data);
         formatPreference && (options.formatPreference = formatPreference);
         return rpcReq.initiate(locality.node,
                                sessionId,
@@ -250,6 +258,12 @@ module.exports.create = function(spec, rpcReq, onSessionEstablished, onSessionAb
 
   that.terminate = function(sessionId, direction, reason) {
     log.debug('terminate, sessionId:', sessionId, 'direction:', direction);
+    if (!sessions[sessionId]) {
+        // It looks like accessController doesn't know if a session is a RTC session or QUIC session.
+        return rtc_controller.terminate(sessionId, direction, reason).catch(e => {
+            quic_controller.terminate(sessionId, direction, reason);
+        });
+    }
 
     var session = sessions[sessionId];
     if (session === undefined || (sessions[sessionId].direction !== direction)) {

@@ -14,7 +14,7 @@
             "../workingNode.js",
             "log4cxx.properties",
             "../../common/cipher.js",
-            "../../common/amqp_client.js",
+            "../../common/amqpClient.js",
             "../../common/clusterWorker.js",
             "../../common/loadCollector.js",
             "../../common/logger.js",
@@ -37,6 +37,10 @@
             {
                 "folder": "sipIn",
                 "name": "sipIn"
+            },
+            {
+                "folder": "../webrtc/rtcFrame",
+                "name": "rtcFrame"
             },
             {
                 "folder": "../addons/internalIO",

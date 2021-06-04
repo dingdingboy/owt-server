@@ -15,7 +15,7 @@
             "../workingNode.js",
             "log4cxx.properties",
             "../../common/cipher.js",
-            "../../common/amqp_client.js",
+            "../../common/amqpClient.js",
             "../../common/clusterWorker.js",
             "../../common/loadCollector.js",
             "../../common/logger.js",
@@ -27,6 +27,8 @@
         "folders": {
             "audio": [
                 "index.js",
+                "selectiveMixer.js",
+                "activeAudioSelector.js",
                 "../connections.js",
                 "../InternalConnectionFactory.js"
             ]
@@ -54,6 +56,10 @@
             {
                 "folder": "../addons/quicIO",
                 "name": "quicIO"
+            },
+            {
+                "folder": "../addons/audioRanker",
+                "name": "audioRanker"
             }
         ]
     },

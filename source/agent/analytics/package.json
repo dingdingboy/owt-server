@@ -1,8 +1,8 @@
 {
   "name": "OWT-Server-Agent",
-  "version":"4.2.0",
+  "version":"5.0.0",
   "dependencies": {
-    "amqp": "*",
+    "amqplib": "^0.7.0",
     "log4js": "^1.1.1",
     "node-getopt": "*",
     "toml": "*"

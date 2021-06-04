@@ -2,9 +2,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include "RawTransport.h"
-
+#include <fstream>
 #include <netinet/in.h>
+#include "RawTransport.h"
 
 namespace owt_base {
 
@@ -13,13 +13,31 @@ using boost::asio::ip::tcp;
 
 DEFINE_TEMPLATE_LOGGER(template<Protocol prot>, RawTransport<prot>, "owt.RawTransport");
 
+static constexpr const uint32_t kMaxTicketLen = 64;
+static constexpr const char kServerCrt[] = "cert/server.crt";
+static constexpr const char kServerKey[] = "cert/server.key";
+static constexpr const char kDHParams[] = "cert/dh2048.pem";
+
+static std::string gServerPass = "";
+
+template<Protocol prot>
+void RawTransport<prot>::setPassphrase(std::string p)
+{
+    std::fill(gServerPass.begin(), gServerPass.end(), 0);
+    gServerPass = p;
+}
+
 template<Protocol prot>
 RawTransport<prot>::RawTransport(RawTransportListener* listener, size_t initialBufferSize, bool tag)
     : m_isClosing(false)
     , m_tag(tag)
     , m_bufferSize(initialBufferSize)
+    , m_service(getIOService())
     , m_listener(listener)
     , m_receivedBytes(0)
+    , m_ssl(false)
+    , m_isListener(false)
+    , m_verified(false)
 {
 }
 
@@ -36,11 +54,9 @@ void RawTransport<prot>::close()
     if (m_isClosing)
         return;
 
-    // We need to wait for the work thread to finish its job.
     m_isClosing = true;
-    m_ioService.stop();
-    m_workThread.join();
-
+    // Release the service
+    m_service.reset();
     boost::system::error_code ec;
     switch (prot) {
     case TCP:
@@ -49,6 +65,11 @@ void RawTransport<prot>::close()
         if (m_socket.tcp.socket) {
             m_socket.tcp.socket->shutdown(tcp::socket::shutdown_both, ec);
             m_socket.tcp.socket->close();
+        }
+        if (m_socket.ssl.socket) {
+            m_socket.ssl.socket->shutdown(ec);
+            m_socket.ssl.socket->lowest_layer().shutdown(
+                tcp::socket::shutdown_both, ec);
         }
         break;
     case UDP:
@@ -64,22 +85,114 @@ void RawTransport<prot>::close()
 }
 
 template<Protocol prot>
+bool RawTransport<prot>::initTicket(const std::string& ticket)
+{
+    ELOG_DEBUG("initTicket");
+    m_connectTicket = ticket;
+    if (m_connectTicket.length() > kMaxTicketLen) {
+        m_connectTicket.resize(kMaxTicketLen);
+        return false;
+    }
+    return true;
+}
+
+template<Protocol prot>
+void RawTransport<prot>::sendTicket()
+{
+    if (!m_verified) {
+        ELOG_DEBUG("Send ticket");
+        int len = m_connectTicket.length();
+        TransportData data;
+        if (m_tag) {
+            data.buffer.reset(new char[len + 4]);
+            *(reinterpret_cast<uint32_t*>(data.buffer.get())) = htonl(len);
+            memcpy(data.buffer.get() + 4, m_connectTicket.c_str(), len);
+            data.length = len + 4;
+        } else {
+            data.buffer.reset(new char[len]);
+            memcpy(data.buffer.get(), m_connectTicket.c_str(), len);
+            data.length = len;
+        }
+        boost::lock_guard<boost::mutex> lock(m_sendQueueMutex);
+        m_sendQueue.push(data);
+        assert(m_sendQueue.size() == 1);
+        doSend();
+        m_verified = true;
+    }
+}
+
+template<Protocol prot>
+void RawTransport<prot>::receiveTicket(char* data, int len)
+{
+    ELOG_DEBUG("Receive ticket");
+    std::string receivedTicket(data, len);
+
+    if (m_connectTicket == receivedTicket) {
+        m_verified = true;
+    } else {
+        boost::system::error_code ec;
+        if (m_socket.tcp.socket) {
+            m_socket.tcp.socket->shutdown(tcp::socket::shutdown_both, ec);
+            m_socket.tcp.socket->close();
+        }
+        if (m_socket.ssl.socket) {
+            m_socket.ssl.socket->shutdown();
+        }
+        if (m_socket.udp.socket) {
+            m_socket.udp.socket->shutdown(udp::socket::shutdown_both, ec);
+            m_socket.udp.socket->close();
+        }
+        ELOG_WARN("Wrong connect ticket");
+        if (ec) {
+            ELOG_DEBUG("receiveTicket shutdown error: %s", ec.message().c_str());
+        }
+    }
+}
+
+template<Protocol prot>
 void RawTransport<prot>::createConnection(const std::string& ip, uint32_t port)
 {
+    if (std::fstream{kServerCrt}) {
+        m_ssl = true;
+    }
+    if (m_connectTicket.empty()) {
+        m_verified = true;
+    }
     switch (prot) {
     case TCP: {
-        if (m_socket.tcp.socket) {
-            ELOG_WARN("TCP transport existed, ignoring the connection request for ip %s port %d\n", ip.c_str(), port);
+        if (m_ssl) {
+            if (m_socket.ssl.socket) {
+                ELOG_WARN("TSL transport existed, ignoring the connection request for ip %s port %d\n", ip.c_str(), port);
+            } else {
+                m_socket.ssl.context.reset(new boost::asio::ssl::context(
+                    m_service->service(), boost::asio::ssl::context::sslv23));
+                m_socket.ssl.context->set_verify_mode(boost::asio::ssl::context::verify_peer);
+                m_socket.ssl.context->load_verify_file(kServerCrt);
+
+                m_socket.ssl.socket.reset(new ssl_socket(
+                    m_service->service(), *(m_socket.ssl.context)));
+                tcp::resolver resolver(m_service->service());
+                tcp::resolver::query query(ip.c_str(), boost::to_string(port).c_str());
+                tcp::resolver::iterator iterator = resolver.resolve(query);
+
+                m_socket.ssl.socket->lowest_layer().async_connect(*iterator,
+                    boost::bind(&RawTransport::connectHandler, this,
+                        boost::asio::placeholders::error));
+            }
         } else {
-            m_socket.tcp.socket.reset(new tcp::socket(m_ioService));
-            tcp::resolver resolver(m_ioService);
-            tcp::resolver::query query(ip.c_str(), boost::to_string(port).c_str());
-            tcp::resolver::iterator iterator = resolver.resolve(query);
-            // TODO: Accept IPv6.
-            m_socket.tcp.socket->open(boost::asio::ip::tcp::v4());
-            m_socket.tcp.socket->async_connect(*iterator,
-                boost::bind(&RawTransport::connectHandler, this,
-                    boost::asio::placeholders::error));
+            if (m_socket.tcp.socket) {
+                ELOG_WARN("TCP transport existed, ignoring the connection request for ip %s port %d\n", ip.c_str(), port);
+            } else {
+                m_socket.tcp.socket.reset(new tcp::socket(m_service->service()));
+                tcp::resolver resolver(m_service->service());
+                tcp::resolver::query query(ip.c_str(), boost::to_string(port).c_str());
+                tcp::resolver::iterator iterator = resolver.resolve(query);
+                // TODO: Accept IPv6.
+                m_socket.tcp.socket->open(boost::asio::ip::tcp::v4());
+                m_socket.tcp.socket->async_connect(*iterator,
+                    boost::bind(&RawTransport::connectHandler, this,
+                        boost::asio::placeholders::error));
+            }
         }
         break;
     }
@@ -87,8 +200,8 @@ void RawTransport<prot>::createConnection(const std::string& ip, uint32_t port)
         if (m_socket.udp.socket) {
             ELOG_WARN("UDP transport existed, ignoring the connection request for ip %s port %d\n", ip.c_str(), port);
         } else {
-            m_socket.udp.socket.reset(new udp::socket(m_ioService));
-            udp::resolver resolver(m_ioService);
+            m_socket.udp.socket.reset(new udp::socket(m_service->service()));
+            udp::resolver resolver(m_service->service());
             udp::resolver::query query(udp::v4(), ip.c_str(), boost::to_string(port).c_str());
             udp::resolver::iterator iterator = resolver.resolve(query);
 
@@ -103,9 +216,6 @@ void RawTransport<prot>::createConnection(const std::string& ip, uint32_t port)
     default:
         break;
     }
-
-    if (m_workThread.get_id() == boost::thread::id()) // Not-A-Thread
-        m_workThread = boost::thread(boost::bind(&boost::asio::io_service::run, &m_ioService));
 }
 
 template<Protocol prot>
@@ -115,6 +225,15 @@ void RawTransport<prot>::connectHandler(const boost::system::error_code& ec)
         return;
 
     if (!ec) {
+        if (m_ssl) {
+            m_socket.ssl.socket->lowest_layer().set_option(tcp::no_delay(true));
+            m_socket.ssl.socket->async_handshake(
+                boost::asio::ssl::stream_base::client,
+                boost::bind(&RawTransport::handshakeHandler, this,
+                    boost::asio::placeholders::error));
+            return;
+        }
+
         switch (prot) {
         case TCP:
             ELOG_DEBUG("Connect ok, local TCP port: %d", m_socket.tcp.socket->local_endpoint().port());
@@ -131,6 +250,7 @@ void RawTransport<prot>::connectHandler(const boost::system::error_code& ec)
             break;
         }
 
+        sendTicket();
         m_listener->onTransportConnected();
         receiveData();
     } else {
@@ -147,6 +267,15 @@ void RawTransport<prot>::acceptHandler(const boost::system::error_code& ec)
         return;
 
     if (!ec) {
+        if (m_ssl) {
+            m_socket.ssl.socket->lowest_layer().set_option(tcp::no_delay(true));
+            m_socket.ssl.socket->async_handshake(
+                boost::asio::ssl::stream_base::server,
+                boost::bind(&RawTransport::handshakeHandler, this,
+                    boost::asio::placeholders::error));
+            return;
+        }
+
         switch (prot) {
         case TCP:
             ELOG_DEBUG("Accept ok, local TCP listening port: %d", m_socket.tcp.socket->local_endpoint().port());
@@ -172,19 +301,70 @@ void RawTransport<prot>::acceptHandler(const boost::system::error_code& ec)
 }
 
 template<Protocol prot>
+void RawTransport<prot>::handshakeHandler(const boost::system::error_code& ec)
+{
+    if (!ec) {
+        ELOG_DEBUG("Handshake completed");
+        if (!m_isListener) {
+            sendTicket();
+        }
+        m_listener->onTransportConnected();
+        receiveData();
+    } else {
+        ELOG_ERROR("Error during handshake: %s", ec.message().c_str());
+        // Notify the listener about the socket error if the listener is not closing me.
+        m_listener->onTransportError();
+    }
+}
+
+template<Protocol prot>
 void RawTransport<prot>::listenTo(uint32_t port)
 {
+    m_isListener = true;
+    if (std::fstream{kServerCrt} &&
+        std::fstream{kServerKey} &&
+        std::fstream{kDHParams}) {
+        m_ssl = true;
+    }
+    if (m_connectTicket.empty()) {
+        m_verified = true;
+    }
     switch (prot) {
     case TCP: {
-        if (m_socket.tcp.socket) {
-            ELOG_WARN("TCP transport existed, ignoring the listening request for port %d\n", port);
+        if (m_ssl) {
+            if (m_socket.ssl.socket) {
+                ELOG_WARN("TLS transport existed, ignoring the listening request for port %d\n", port);
+            } else {
+                m_socket.ssl.context.reset(new boost::asio::ssl::context(
+                    m_service->service(), boost::asio::ssl::context::sslv23));
+                m_socket.ssl.context->set_options(
+                    boost::asio::ssl::context::default_workarounds
+                    | boost::asio::ssl::context::single_dh_use);
+                m_socket.ssl.context->set_password_callback([](std::size_t&, boost::asio::ssl::context_base::password_purpose&) {
+                    return gServerPass;
+                });
+                m_socket.ssl.context->use_certificate_chain_file(kServerCrt);
+                m_socket.ssl.context->use_private_key_file(kServerKey, boost::asio::ssl::context::pem);
+                m_socket.ssl.context->use_tmp_dh_file(kDHParams);
+
+                m_socket.ssl.socket.reset(new ssl_socket(
+                    m_service->service(), *(m_socket.ssl.context)));
+                m_socket.ssl.acceptor.reset(new tcp::acceptor(m_service->service(), tcp::endpoint(tcp::v4(), port)));
+                m_socket.ssl.acceptor->async_accept(m_socket.ssl.socket->lowest_layer(),
+                    boost::bind(&RawTransport::acceptHandler, this,
+                        boost::asio::placeholders::error));
+            }
         } else {
-            m_socket.tcp.socket.reset(new tcp::socket(m_ioService));
-            m_socket.tcp.acceptor.reset(new tcp::acceptor(m_ioService, tcp::endpoint(tcp::v4(), port)));
-            m_socket.tcp.acceptor->async_accept(*(m_socket.tcp.socket.get()),
-                boost::bind(&RawTransport::acceptHandler, this,
-                    boost::asio::placeholders::error));
-            ELOG_DEBUG("TCP transport listening on %s:%d", m_socket.tcp.acceptor->local_endpoint().address().to_string().c_str(), m_socket.tcp.acceptor->local_endpoint().port());
+            if (m_socket.tcp.socket) {
+                ELOG_WARN("TCP transport existed, ignoring the listening request for port %d\n", port);
+            } else {
+                m_socket.tcp.socket.reset(new tcp::socket(m_service->service()));
+                m_socket.tcp.acceptor.reset(new tcp::acceptor(m_service->service(), tcp::endpoint(tcp::v4(), port)));
+                m_socket.tcp.acceptor->async_accept(*(m_socket.tcp.socket.get()),
+                    boost::bind(&RawTransport::acceptHandler, this,
+                        boost::asio::placeholders::error));
+                ELOG_DEBUG("TCP transport listening on %s:%d", m_socket.tcp.acceptor->local_endpoint().address().to_string().c_str(), m_socket.tcp.acceptor->local_endpoint().port());
+            }
         }
         break;
     }
@@ -192,7 +372,7 @@ void RawTransport<prot>::listenTo(uint32_t port)
         if (m_socket.udp.socket) {
             ELOG_WARN("UDP transport existed, ignoring the listening request for port %d\n", port);
         } else {
-            m_socket.udp.socket.reset(new udp::socket(m_ioService, udp::endpoint(udp::v4(), port)));
+            m_socket.udp.socket.reset(new udp::socket(m_service->service(), udp::endpoint(udp::v4(), port)));
             receiveData();
         }
         break;
@@ -200,20 +380,26 @@ void RawTransport<prot>::listenTo(uint32_t port)
     default:
         break;
     }
-
-    if (m_workThread.get_id() == boost::thread::id()) // Not-A-Thread
-        m_workThread = boost::thread(boost::bind(&boost::asio::io_service::run, &m_ioService));
 }
 
 template<Protocol prot>
 void RawTransport<prot>::listenTo(uint32_t minPort, uint32_t maxPort)
 {
+    m_isListener = true;
+    if (std::fstream{kServerCrt} &&
+        std::fstream{kServerKey} &&
+        std::fstream{kDHParams}) {
+        m_ssl = true;
+    }
+    if (m_connectTicket.empty()) {
+        m_verified = true;
+    }
     switch (prot) {
     case TCP: {
         if (m_socket.tcp.socket) {
             ELOG_WARN("TCP transport existed, ignoring the listening request for minPort %d, maxPort %d\n", minPort, maxPort);
         } else {
-            m_socket.tcp.socket.reset(new tcp::socket(m_ioService));
+            m_socket.tcp.socket.reset(new tcp::socket(m_service->service()));
 
             // find port in range
             uint32_t portRange = maxPort - minPort + 1;
@@ -221,11 +407,11 @@ void RawTransport<prot>::listenTo(uint32_t minPort, uint32_t maxPort)
             boost::system::error_code ec;
 
             for (uint32_t i = 0; i < portRange; i++) {
-                m_socket.tcp.acceptor.reset(new tcp::acceptor(m_ioService));
+                m_socket.tcp.acceptor.reset(new tcp::acceptor(m_service->service()));
                 m_socket.tcp.acceptor->open(tcp::v4());
                 m_socket.tcp.acceptor->bind(tcp::endpoint(tcp::v4(), port), ec);
 
-                if (ec != boost::system::errc::address_in_use) {
+                if (ec.value() != boost::system::errc::address_in_use) {
                     break;
                 }
                 if (m_socket.tcp.acceptor->is_open()) {
@@ -260,7 +446,7 @@ void RawTransport<prot>::listenTo(uint32_t minPort, uint32_t maxPort)
             ELOG_WARN("UDP transport existed, ignoring the listening request for minPort %d, maxPort %d\n", minPort, maxPort);
         } else {
             ELOG_WARN("UDP transport does not support listening in specific range.");
-            m_socket.udp.socket.reset(new udp::socket(m_ioService, udp::endpoint(udp::v4(), 0)));
+            m_socket.udp.socket.reset(new udp::socket(m_service->service(), udp::endpoint(udp::v4(), 0)));
             receiveData();
         }
         break;
@@ -268,9 +454,6 @@ void RawTransport<prot>::listenTo(uint32_t minPort, uint32_t maxPort)
     default:
         break;
     }
-
-    if (m_workThread.get_id() == boost::thread::id()) // Not-A-Thread
-        m_workThread = boost::thread(boost::bind(&boost::asio::io_service::run, &m_ioService));
 }
 
 template<Protocol prot>
@@ -279,8 +462,10 @@ unsigned short RawTransport<prot>::getListeningPort()
     unsigned short port = 0;
     switch (prot) {
     case TCP: {
-        if (m_socket.tcp.acceptor)
+        if (!m_ssl && m_socket.tcp.acceptor)
             port = m_socket.tcp.acceptor->local_endpoint().port();
+        if (m_ssl && m_socket.ssl.acceptor)
+            port = m_socket.ssl.acceptor->local_endpoint().port();
         break;
     }
     case UDP: {
@@ -305,7 +490,11 @@ void RawTransport<prot>::readHandler(const boost::system::error_code& ec, std::s
 
     if (!ec || ec == boost::asio::error::message_size) {
         if (!m_tag) {
-            m_listener->onTransportData(m_receiveData.buffer.get(), bytes);
+            if (!m_verified && m_isListener) {
+                receiveTicket(m_receiveData.buffer.get(), bytes);
+            } else {
+                m_listener->onTransportData(m_receiveData.buffer.get(), bytes);
+            }
             receiveData();
             return;
         }
@@ -314,15 +503,26 @@ void RawTransport<prot>::readHandler(const boost::system::error_code& ec, std::s
 
         switch (prot) {
         case TCP:
-            assert(m_socket.tcp.socket);
+            if (m_ssl) {
+                assert(m_socket.ssl.socket);
+            } else {
+                assert(m_socket.tcp.socket);
+            }
 
             m_receivedBytes += bytes;
             if (4 > m_receivedBytes) {
                 ELOG_DEBUG("Incomplete header, continue receiving %u bytes", 4 - m_receivedBytes);
-                m_socket.tcp.socket->async_read_some(boost::asio::buffer(m_readHeader + m_receivedBytes, 4 - m_receivedBytes),
+                if (m_ssl) {
+                    m_socket.ssl.socket->async_read_some(boost::asio::buffer(m_readHeader + m_receivedBytes, 4 - m_receivedBytes),
                         boost::bind(&RawTransport::readHandler, this,
                             boost::asio::placeholders::error,
                             boost::asio::placeholders::bytes_transferred));
+                } else {
+                    m_socket.tcp.socket->async_read_some(boost::asio::buffer(m_readHeader + m_receivedBytes, 4 - m_receivedBytes),
+                        boost::bind(&RawTransport::readHandler, this,
+                            boost::asio::placeholders::error,
+                            boost::asio::placeholders::bytes_transferred));
+                }
             } else {
                 payloadlen = ntohl(*(reinterpret_cast<uint32_t*>(m_readHeader)));
                 if (payloadlen > m_bufferSize) {
@@ -333,10 +533,17 @@ void RawTransport<prot>::readHandler(const boost::system::error_code& ec, std::s
                 ELOG_DEBUG("readHandler(%zu):[%x,%x,%x,%x], payloadlen:%u", bytes, m_readHeader[0], m_readHeader[1], (unsigned char)m_readHeader[2], (unsigned char)m_readHeader[3], payloadlen);
 
                 m_receivedBytes = 0;
-                m_socket.tcp.socket->async_read_some(boost::asio::buffer(m_receiveData.buffer.get(), payloadlen),
-                    boost::bind(&RawTransport::readPacketHandler, this,
-                        boost::asio::placeholders::error,
-                        boost::asio::placeholders::bytes_transferred));
+                if (m_ssl) {
+                    m_socket.ssl.socket->async_read_some(boost::asio::buffer(m_receiveData.buffer.get(), payloadlen),
+                        boost::bind(&RawTransport::readPacketHandler, this,
+                            boost::asio::placeholders::error,
+                            boost::asio::placeholders::bytes_transferred));
+                } else {
+                    m_socket.tcp.socket->async_read_some(boost::asio::buffer(m_receiveData.buffer.get(), payloadlen),
+                        boost::bind(&RawTransport::readPacketHandler, this,
+                            boost::asio::placeholders::error,
+                            boost::asio::placeholders::bytes_transferred));
+                }
             }
             break;
         case UDP:
@@ -349,9 +556,12 @@ void RawTransport<prot>::readHandler(const boost::system::error_code& ec, std::s
             } else {
                 unsigned char *p = reinterpret_cast<unsigned char*>(&(m_receiveData.buffer.get())[4]);
                 ELOG_DEBUG("readHandler(%zu): [%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x...%x,%x,%x,%x]", bytes, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15], p[payloadlen-4], p[payloadlen-3], p[payloadlen-2], p[payloadlen-1]);
-                m_listener->onTransportData(m_receiveData.buffer.get() + 4, payloadlen);
+                if (!m_verified && m_isListener) {
+                    receiveTicket(m_receiveData.buffer.get() + 4, payloadlen);
+                } else {
+                    m_listener->onTransportData(m_receiveData.buffer.get() + 4, payloadlen);
+                }
             }
-
             receiveData();
             break;
         default:
@@ -370,7 +580,9 @@ void RawTransport<prot>::readPacketHandler(const boost::system::error_code& ec, 
     if (m_isClosing)
         return;
 
-    ELOG_DEBUG("Port#%d recieved data(%zu)", m_socket.tcp.acceptor->local_endpoint().port(), bytes);
+    if (m_socket.tcp.acceptor) {
+        ELOG_DEBUG("Port#%d recieved data(%zu)", m_socket.tcp.acceptor->local_endpoint().port(), bytes);
+    }
     uint32_t expectedLen = ntohl(*(reinterpret_cast<uint32_t*>(m_readHeader)));
     if (!ec || ec == boost::asio::error::message_size) {
         switch (prot) {
@@ -379,13 +591,24 @@ void RawTransport<prot>::readPacketHandler(const boost::system::error_code& ec, 
             if (expectedLen > m_receivedBytes) {
                 ELOG_DEBUG("Expect to receive %u bytes, but actually received %zu bytes.", expectedLen, bytes);
                 ELOG_DEBUG("Continue receiving %u bytes.", expectedLen - m_receivedBytes);
-                m_socket.tcp.socket->async_read_some(boost::asio::buffer(m_receiveData.buffer.get() + m_receivedBytes, expectedLen - m_receivedBytes),
+                if (m_ssl) {
+                    m_socket.ssl.socket->async_read_some(boost::asio::buffer(m_receiveData.buffer.get() + m_receivedBytes, expectedLen - m_receivedBytes),
                         boost::bind(&RawTransport::readPacketHandler, this,
                             boost::asio::placeholders::error,
                             boost::asio::placeholders::bytes_transferred));
+                } else {
+                    m_socket.tcp.socket->async_read_some(boost::asio::buffer(m_receiveData.buffer.get() + m_receivedBytes, expectedLen - m_receivedBytes),
+                        boost::bind(&RawTransport::readPacketHandler, this,
+                            boost::asio::placeholders::error,
+                            boost::asio::placeholders::bytes_transferred));
+                }
             } else {
                 m_receivedBytes = 0;
-                m_listener->onTransportData(m_receiveData.buffer.get(), expectedLen);
+                if (!m_verified && m_isListener) {
+                    receiveTicket(m_receiveData.buffer.get(), expectedLen);
+                } else {
+                    m_listener->onTransportData(m_receiveData.buffer.get(), expectedLen);
+                }
                 receiveData();
             }
             break;
@@ -412,12 +635,21 @@ void RawTransport<prot>::doSend()
 
     switch (prot) {
     case TCP:
-        ELOG_DEBUG("Port#%d to send(%d)", m_socket.tcp.socket->local_endpoint().port(), data.length);
-        assert(m_socket.tcp.socket);
-        boost::asio::async_write(*(m_socket.tcp.socket), boost::asio::buffer(data.buffer.get(), data.length),
-            boost::bind(&RawTransport::writeHandler, this,
-                boost::asio::placeholders::error,
-                boost::asio::placeholders::bytes_transferred));
+        if (m_ssl) {
+            assert(m_socket.ssl.socket);
+            ELOG_DEBUG("Port#%d to send(%d)", m_socket.ssl.socket->lowest_layer().local_endpoint().port(), data.length);
+            boost::asio::async_write(*(m_socket.ssl.socket), boost::asio::buffer(data.buffer.get(), data.length),
+                boost::bind(&RawTransport::writeHandler, this,
+                    boost::asio::placeholders::error,
+                    boost::asio::placeholders::bytes_transferred));
+        } else {
+            assert(m_socket.tcp.socket);
+            ELOG_DEBUG("Port#%d to send(%d)", m_socket.tcp.socket->local_endpoint().port(), data.length);
+            boost::asio::async_write(*(m_socket.tcp.socket), boost::asio::buffer(data.buffer.get(), data.length),
+                boost::bind(&RawTransport::writeHandler, this,
+                    boost::asio::placeholders::error,
+                    boost::asio::placeholders::bytes_transferred));
+        }
         break;
     case UDP:
         assert(m_socket.udp.socket);
@@ -497,6 +729,10 @@ void RawTransport<prot>::dumpTcpSSLv3Header(const char* buf, int len)
 template<Protocol prot>
 void RawTransport<prot>::sendData(const char* buf, int len)
 {
+    if (!m_verified) {
+        return;
+    }
+
     TransportData data;
     if (m_tag) {
         data.buffer.reset(new char[len + 4]);
@@ -518,6 +754,10 @@ void RawTransport<prot>::sendData(const char* buf, int len)
 template<Protocol prot>
 void RawTransport<prot>::sendData(const char* header, int headerLength, const char* payload, int payloadLength)
 {
+    if (!m_verified) {
+        return;
+    }
+
     TransportData data;
     if (m_tag) {
         data.buffer.reset(new char[headerLength + payloadLength + 4]);
@@ -546,17 +786,32 @@ void RawTransport<prot>::receiveData()
 
     switch (prot) {
     case TCP:
-        assert(m_socket.tcp.socket);
-        if (m_tag) {
-            m_socket.tcp.socket->async_read_some(boost::asio::buffer(m_readHeader, 4),
-                boost::bind(&RawTransport::readHandler, this,
-                    boost::asio::placeholders::error,
-                    boost::asio::placeholders::bytes_transferred));
+        if (m_ssl) {
+            assert(m_socket.ssl.socket);
+            if (m_tag) {
+                m_socket.ssl.socket->async_read_some(boost::asio::buffer(m_readHeader, 4),
+                    boost::bind(&RawTransport::readHandler, this,
+                        boost::asio::placeholders::error,
+                        boost::asio::placeholders::bytes_transferred));
+            } else {
+                m_socket.ssl.socket->async_read_some(boost::asio::buffer(m_receiveData.buffer.get(), m_bufferSize),
+                    boost::bind(&RawTransport::readHandler, this,
+                        boost::asio::placeholders::error,
+                        boost::asio::placeholders::bytes_transferred));
+            }
         } else {
-            m_socket.tcp.socket->async_read_some(boost::asio::buffer(m_receiveData.buffer.get(), m_bufferSize),
-                boost::bind(&RawTransport::readHandler, this,
-                    boost::asio::placeholders::error,
-                    boost::asio::placeholders::bytes_transferred));
+            assert(m_socket.tcp.socket);
+            if (m_tag) {
+                m_socket.tcp.socket->async_read_some(boost::asio::buffer(m_readHeader, 4),
+                    boost::bind(&RawTransport::readHandler, this,
+                        boost::asio::placeholders::error,
+                        boost::asio::placeholders::bytes_transferred));
+            } else {
+                m_socket.tcp.socket->async_read_some(boost::asio::buffer(m_receiveData.buffer.get(), m_bufferSize),
+                    boost::bind(&RawTransport::readHandler, this,
+                        boost::asio::placeholders::error,
+                        boost::asio::placeholders::bytes_transferred));
+            }
         }
         break;
     case UDP:

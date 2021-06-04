@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -e
 
 SCRIPT=`readlink -e ${BASH_SOURCE[0]}`
 FILENAME=`basename $SCRIPT`
@@ -14,5 +14,10 @@ CLEANUP=false
 NIGHTLY=false
 NO_INTERNAL=false
 INCR_INSTALL=false
+SUDO=""
+
+if [[ $EUID -ne 0 ]]; then
+  SUDO="sudo -E"
+fi
 
 . ${PATHNAME}/installCommonDeps.sh

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -e
 SCRIPT=`pwd`/$0
 FILENAME=`basename $SCRIPT`
 PATHNAME=`dirname $SCRIPT`
@@ -13,6 +13,11 @@ CLEANUP=false
 NO_INTERNAL=false
 INCR_INSTALL=false
 ONLY_INSTALL=""
+SUDO=""
+
+if [[ $EUID -ne 0 ]]; then
+  SUDO="sudo -E"
+fi
 
 parse_arguments(){
   while [ "$1" != "" ]; do
@@ -39,6 +44,7 @@ parse_arguments(){
 }
 
 OS=`$PATHNAME/detectOS.sh | awk '{print tolower($0)}'`
+OS_VERSION=`$PATHNAME/detectOS.sh | awk '{print tolower($2)}'`
 echo $OS
 
 cd $PATHNAME
@@ -62,11 +68,22 @@ then
     [Yy]* ) installYumDeps;;
     * ) installYumDeps;;
   esac
+
+  read -p "Installing boost [Yes/no]" yn
+  case $yn in
+    [Nn]* ) ;;
+    [Yy]* ) install_boost;;
+    * ) install_boost;;
+  esac
 elif [[ "$OS" =~ .*ubuntu.* ]]
 then
   . installUbuntuDeps.sh
   pause "Installing deps via apt-get... [press Enter]"
   install_apt_deps
+  if [[ "$OS_VERSION" =~ 20.04.* ]]
+  then
+    install_boost
+  fi
 fi
 
 parse_arguments $*
@@ -81,10 +98,10 @@ pause "Installing Node.js ... [press Enter]"
 install_node
 
 if [ "$DISABLE_NONFREE" = "true" ]; then
-  pause "Nonfree libraries disabled: aac transcoding unavailable."
+  pause "Nonfree libraries disabled: aac transcoding unavailable. [press Enter]"
   install_mediadeps
 else
-  pause "Nonfree libraries enabled (DO NOT redistribute these libraries!!); to disable nonfree please use the \`--disable-nonfree' option."
+  pause "Nonfree libraries enabled (DO NOT redistribute these libraries!!); to disable nonfree please use the \`--disable-nonfree' option. [press Enter]"
   install_mediadeps_nonfree
 fi
 

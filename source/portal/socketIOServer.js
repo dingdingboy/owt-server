@@ -10,8 +10,7 @@ var crypto = require('crypto');
 var vsprintf = require("sprintf-js").vsprintf;
 
 var LegacyClient = require('./legacyClient');
-var V10Client = require('./v10Client');
-var V11Client = require('./v11Client');
+var Client = require('./client');
 
 function safeCall () {
   var callback = arguments[0];
@@ -49,7 +48,7 @@ var Connection = function(spec, socket, reconnectionKey, portal, dock) {
   };
 
   const validateUserAgent = function(ua){
-    if(!ua||!ua.sdk||!ua.sdk.version||!ua.sdk.type||!ua.runtime||!ua.runtime.version||!ua.runtime.name||!ua.os||!ua.os.version||!ua.os.name){
+    if(!ua||!ua.sdk||!ua.sdk.version||!ua.sdk.type) {
       return Promise.reject('User agent info is incorrect');
     }
     return Promise.resolve(ua.sdk.type === 'Objective-C' || ua.sdk.type === 'C++' || ua.sdk.type === 'Android' || ua.sdk.type == 'JavaScript')
@@ -143,22 +142,17 @@ var Connection = function(spec, socket, reconnectionKey, portal, dock) {
       if (login_info.protocol === undefined) {
         protocol_version = 'legacy';
         client = new LegacyClient(client_id, that, portal);
-      } else if (login_info.protocol === '1.1') {
+      } else if (login_info.protocol === '1.0' ||
+          login_info.protocol === '1.1' ||
+          login_info.protocol === '1.2') {
         //FIXME: Reject connection from 3.5 client
-        if (login_info.userAgent && login_info.userAgent.sdk && login_info.userAgent.sdk.version === '3.5') {
+        if (login_info.userAgent && login_info.userAgent.sdk &&
+            login_info.userAgent.sdk.version === '3.5') {
           safeCall(callback, 'error', 'Deprecated client version');
           return socket.disconnect();
         }
-        protocol_version = '1.1';
-        client = new V11Client(client_id, that, portal);
-      } else if (login_info.protocol === '1.0') {
-        //FIXME: Reject connection from 3.5 client
-        if (login_info.userAgent && login_info.userAgent.sdk && login_info.userAgent.sdk.version === '3.5') {
-          safeCall(callback, 'error', 'Deprecated client version');
-          return socket.disconnect();
-        }
-        protocol_version = '1.0';
-        client = new V10Client(client_id, that, portal);
+        protocol_version = login_info.protocol;
+        client = new Client(client_id, that, portal, protocol_version);
       } else {
         safeCall(callback, 'error', 'Unknown client protocol');
         return socket.disconnect();
@@ -351,16 +345,27 @@ var SocketIOServer = function(spec, portal, observer) {
   // A Socket.IO server has a unique reconnection key. Client cannot reconnect to another Socket.IO server in the cluster.
   var reconnection_key = require('crypto').randomBytes(64).toString('hex');
   var sioOptions = {};
+  // TODO: remove allowEIO3
+  sioOptions.allowEIO3 = true;
   if (spec.pingInterval) {
     sioOptions.pingInterval = spec.pingInterval * 1000;
   }
   if (spec.pingTimeout) {
     sioOptions.pingTimeout = spec.pingTimeout * 1000;
   }
+  if (spec.cors) {
+    sioOptions.cors = {credentials: true};
+    sioOptions.cors.origin = (origin, callback) => {
+      if (spec.cors.indexOf(origin) < 0 && spec.cors.indexOf('*') < 0) {
+        return callback('origin not allowed', false);
+      }
+      callback(null, true);
+    };
+  }
 
   var startInsecure = function(port) {
     var server = require('http').createServer().listen(port);
-    io = require('socket.io').listen(server, sioOptions);
+    io = require('socket.io')(server, sioOptions);
     run();
     return Promise.resolve('ok');
   };
@@ -377,7 +382,7 @@ var SocketIOServer = function(spec, portal, observer) {
             option.secureOptions = (constants.SSL_OP_NO_TLSv1 | constants.SSL_OP_NO_TLSv1_1);
           }
           var server = require('https').createServer(option).listen(port);
-          io = require('socket.io').listen(server, sioOptions);
+          io = require('socket.io')(server, sioOptions);
           run();
           resolve('ok');
         } else {
@@ -447,6 +452,18 @@ var SocketIOServer = function(spec, portal, observer) {
       return Promise.reject('participant does not exist');
     }
   };
+
+  that.broadcast = function(controller, excludeList, event, data) {
+    log.debug('broadcast controller:', controller, 'exclude:', excludeList, 'event:', event, 'data:', data);
+    portal.getParticipantsByController('node', controller)
+      .then(function (receivers) {
+        for (let clientId of receivers) {
+          if (!excludeList.includes(clientId)) {
+            clients[clientId].notify(event, data);
+          }
+        }
+      });
+  }
 
   that.drop = function(participantId) {
     if (participantId === 'all') {

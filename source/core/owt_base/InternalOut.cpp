@@ -16,6 +16,21 @@ InternalOut::InternalOut(const std::string& protocol, const std::string& dest_ip
     m_transport->createConnection(dest_ip, dest_port);
 }
 
+InternalOut::InternalOut(
+    const std::string& protocol,
+    const std::string& ticket,
+    const std::string& dest_ip,
+    unsigned int dest_port)
+{
+    if (protocol == "tcp")
+        m_transport.reset(new owt_base::RawTransport<TCP>(this));
+    else
+        m_transport.reset(new owt_base::RawTransport<UDP>(this));
+
+    m_transport->initTicket(ticket);
+    m_transport->createConnection(dest_ip, dest_port);
+}
+
 InternalOut::~InternalOut()
 {
     m_transport->close();
@@ -31,6 +46,16 @@ void InternalOut::onFrame(const Frame& frame)
     m_transport->sendData(sendBuffer, header_len + 1, reinterpret_cast<char*>(const_cast<uint8_t*>(frame.payload)), frame.length);
 }
 
+void InternalOut::onMetaData(const MetaData& metadata)
+{
+    char sendBuffer[sizeof(MetaData) + 1];
+    size_t header_len = sizeof(MetaData);
+
+    sendBuffer[0] = TDT_MEDIA_METADATA;
+    memcpy(&sendBuffer[1], reinterpret_cast<char*>(const_cast<MetaData*>(&metadata)), header_len);
+    m_transport->sendData(sendBuffer, header_len + 1, reinterpret_cast<char*>(const_cast<uint8_t*>(metadata.payload)), metadata.length);
+}
+
 void InternalOut::onTransportData(char* buf, int len)
 {
     switch (buf[0]) {
@@ -40,7 +65,6 @@ void InternalOut::onTransportData(char* buf, int len)
             break;
     }
 }
-
 
 } /* namespace owt_base */
 

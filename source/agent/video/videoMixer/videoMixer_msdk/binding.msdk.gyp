@@ -18,6 +18,7 @@
       '../../../../core/owt_base/MsdkFrame.cpp',
       '../../../../core/owt_base/MsdkScaler.cpp',
       '../../../../core/owt_base/FastCopy.cpp',
+      '../../../../core/common/JobTimer.cpp',
       '../../../../../third_party/mediasdk/samples/sample_common/src/base_allocator.cpp',
       '../../../../../third_party/mediasdk/samples/sample_common/src/vaapi_allocator.cpp',
     ],
@@ -33,14 +34,16 @@
     'cflags_cc!': [
         '-fno-exceptions',
     ],
-    'include_dirs': [ '../../src',
+    'include_dirs': [ "<!(node -e \"require('nan')\")",
+                      '../../src',
                       '$(CORE_HOME)/common',
                       '$(CORE_HOME)/owt_base',
                       '/opt/intel/mediasdk/include',
                       '$(CORE_HOME)/../../third_party/webrtc/src',
                       '$(CORE_HOME)/../../third_party/webrtc/src/third_party/libyuv/include',
                       '$(CORE_HOME)/../../third_party/mediasdk/samples/sample_common/include',
-                      '$(CORE_HOME)/../../build/libdeps/build/include',
+                      '$(DEFAULT_DEPENDENCY_PATH)/include',
+                      '$(CUSTOM_INCLUDE_PATH)'
     ],
     'libraries': [
       '-lboost_thread',

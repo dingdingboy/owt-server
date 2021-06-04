@@ -19,6 +19,7 @@
       '../../addons/common/NodeEventRegistry.cc',
       '../../../core/owt_base/MediaFramePipeline.cpp',
       '../../../core/owt_base/AudioUtilities.cpp',
+      '../../../core/common/JobTimer.cpp',
     ],
     'cflags_cc': [
         '-Wall',
@@ -30,10 +31,12 @@
     'cflags_cc!': [
         '-fno-exceptions',
     ],
-    'include_dirs': [ '$(CORE_HOME)/common',
+    'include_dirs': [ "<!(node -e \"require('nan')\")",
+                      '$(CORE_HOME)/common',
                       '$(CORE_HOME)/owt_base',
                       '$(CORE_HOME)/../../third_party/webrtc/src',
-                      '$(CORE_HOME)/../../build/libdeps/build/include',
+                      '$(DEFAULT_DEPENDENCY_PATH)/include',
+                      '$(CUSTOM_INCLUDE_PATH)'
     ],
     'libraries': [
       '-L$(CORE_HOME)/../../third_party/webrtc', '-lwebrtc',
